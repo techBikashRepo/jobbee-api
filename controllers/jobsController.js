@@ -1,19 +1,32 @@
 const Job = require("../models/jobs");
 const geoCoder = require("../utils/geocoder");
 const ErrorHandler = require("../utils/errorHandler");
+const catchAsyncErrors = require("../middlewares/catchAsyncErrors");
+const APIFilters = require("../utils/apiFilters");
+const path = require("path");
 
 // Get All Jobs ==> /api/v1/jobs
-exports.getJobs = async (req, res, next) => {
-  const allJobsList = await Job.find();
+exports.getJobs = catchAsyncErrors(async (req, res, next) => {
+  const apiFilters = new APIFilters(Job.find(), req.query)
+    .filter()
+    .sort()
+    .limitFields()
+    .searchByQuery()
+    .pagination();
+
+  const allJobsList = await apiFilters.query;
   res.status(200).json({
     sucess: true,
     results: allJobsList.length,
     data: allJobsList,
   });
-};
+});
 
 // Create a new Job ==> /api/v1/job/new
-exports.newJob = async (req, res, next) => {
+exports.newJob = catchAsyncErrors(async (req, res, next) => {
+  // Adding user to body
+  req.body.user = req.user.id;
+
   const job = await Job.create(req.body);
 
   res.status(200).json({
@@ -21,10 +34,10 @@ exports.newJob = async (req, res, next) => {
     message: "Job Created.",
     data: job,
   });
-};
+});
 
 // Update a Job ==> /api/v1/job/:id
-exports.updateJob = async (req, res, next) => {
+exports.updateJob = catchAsyncErrors(async (req, res, next) => {
   let job = await Job.findById(req.params.id);
   if (!job) {
     return next(new ErrorHandler("Job not found.", 404));
@@ -39,10 +52,10 @@ exports.updateJob = async (req, res, next) => {
     message: "Job is updated.",
     data: job,
   });
-};
+});
 
 // Delete a job by ID ==> /api/v1/job/:id
-exports.deleteJob = async (req, res, next) => {
+exports.deleteJob = catchAsyncErrors(async (req, res, next) => {
   let job = await Job.findById(req.params.id);
   if (!job) {
     return next(new ErrorHandler("Job not found.", 404));
@@ -54,26 +67,13 @@ exports.deleteJob = async (req, res, next) => {
     success: true,
     message: "Job deleted successfully.",
   });
-};
+});
 
 // Find single Job by ID and Slug ==> /api/v1/job/:id/:slug
-exports.getJobsByIdAndSlug = async (req, res, next) => {
-  const { id, slug } = req.params;
-
-  let job = await Job.find({ $and: [{ _id: id, slug: slug }] });
-  if (!job || job.length === 0) {
-    return next(new ErrorHandler("Job not found.", 404));
-  }
-
-  res.status(200).json({
-    success: true,
-    result: job.length,
-    data: job,
-  });
-};
+exports.getJobsByIdAndSlug = catchAsyncErrors;
 
 // Search Jobs within radius ==> /api/v1/jobs/:zipcode/:distance
-exports.getJobsInRadius = async (req, res, next) => {
+exports.getJobsInRadius = catchAsyncErrors(async (req, res, next) => {
   const { zipcode, distance } = req.params;
 
   // Getting latitude and longitude from geoCoder
@@ -93,10 +93,10 @@ exports.getJobsInRadius = async (req, res, next) => {
     result: jobs.length,
     data: jobs,
   });
-};
+});
 
 // Get stats about a topic (jobs) ==> /api/v1/stats/:topic
-exports.jobStats = async (req, res, next) => {
+exports.jobStats = catchAsyncErrors(async (req, res, next) => {
   const stats = await Job.aggregate([
     {
       $match: { $text: { $search: `"${req.params.topic}"` } },
@@ -113,13 +113,93 @@ exports.jobStats = async (req, res, next) => {
     },
   ]);
   if (stats.length === 0) {
-    return res.status(200).json({
-      success: false,
-      message: `No stats found for - ${req.params.topic}`,
-    });
+    return next(
+      new ErrorHandler(`No stats found for - ${req.params.topic}`, 200)
+    );
   }
   res.status(200).json({
     success: true,
     data: stats,
   });
-};
+});
+
+// Apply Job using Resume  ==> /api/v1/job/:id/apply
+exports.applyJob = catchAsyncErrors(async (req, res, next) => {
+  let job = await Job.findById(req.params.id).select(`+applicantsApplied`);
+
+  if (!job) {
+    return next(new ErrorHandler("Job not found.", 404));
+  }
+
+  // Check if jobs last date has been passed or not
+  if (job.lastDate < new Date(Date.now())) {
+    return next(new ErrorHandler("Job has been expired", 400));
+  }
+
+  // Check is user has already applied to this job
+
+  for (let i = 0; i < job.applicantsApplied; i++) {
+    if (job.applicantsApplied[i].id == req.user.id) {
+      return next(new ErrorHandler("Already applied", 400));
+    }
+  }
+  job = await Job.find({ applicantsApplied: req.user.id }).select(
+    "+applicantsApplied"
+  );
+  if (job) {
+    return next(new ErrorHandler("Already applied", 400));
+  }
+
+  // Check the file
+  if (!req.files) {
+    return next(new ErrorHandler("Please upload a file", 400));
+  }
+
+  const file = req.files.file;
+
+  // Check file Type
+  const supportedFiles = /\.(doc|docx|pdf)$/;
+  if (!supportedFiles.test(path.extname(file.name))) {
+    return next(
+      new ErrorHandler("Please upload .doc or .pdf docuent file", 400)
+    );
+  }
+
+  // Check document size
+  if (file.size > process.env.MAX_FILE_SIZE) {
+    return next(new ErrorHandler("Please upload file less than 20MB", 400));
+  }
+
+  // Renaming Resume
+  file.name ==
+    `${req.user.name.replace(" ", "_")}_${job._id}${path.parse(file.name).ext}`;
+
+  file.mv(`${process.env.UPLOAD_PATH}/${file.name}`, async (err) => {
+    if (err) {
+      console.log(err);
+      return next(new ErrorHandler(`Resume upload failed`, 500));
+    }
+
+    await Job.findByIdAndUpdate(
+      req.params.id,
+      {
+        $push: {
+          applicantsApplied: {
+            id: req.user.id,
+            resume: file.name,
+          },
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Applied to Job successfully",
+      data: file.name,
+    });
+  });
+});

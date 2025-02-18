@@ -95,6 +95,23 @@ const jobSchema = new mongoose.Schema({
     type: Number,
     required: [true, "Please enter expected salary for this job."],
   },
+  postingDate: {
+    type: Date,
+    default: Date.now,
+  },
+  lastDate: {
+    type: Date,
+    default: new Date().setDate(new Date().getDate() + 7),
+  },
+  applicantsApplied: {
+    type: [Object],
+    select: false,
+  },
+  user: {
+    type: mongoose.Schema.ObjectId,
+    ref: "User",
+    required: true,
+  },
 });
 
 // Creating Job Slug before saving
